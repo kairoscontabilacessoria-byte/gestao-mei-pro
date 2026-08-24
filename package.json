@@ -1,0 +1,11 @@
+{
+  "name": "gestao-mei-pro",
+  "version": "1.4.1",
+  "private": true,
+  "dependencies": {
+    "@neondatabase/serverless": "^1.0.1"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
