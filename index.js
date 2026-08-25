@@ -1,8 +1,14 @@
 
 const { neon } = require('@neondatabase/serverless');
 const crypto = require('crypto');
+const {createResetToken,hashResetToken,resetExpiry,isStrongPassword,buildResetUrl}=require('./password-reset');
+const {sendResetEmail}=require('./resend-email');
 
 const ADMIN_EMAIL='admin@gestaomei.local';
+const PASSWORD_RECOVERY_EMAIL=process.env.PASSWORD_RECOVERY_EMAIL||'';
+const RESEND_API_KEY=process.env.RESEND_API_KEY||'';
+const RESET_FROM_EMAIL=process.env.RESET_FROM_EMAIL||'Gestão MEI Pro <onboarding@resend.dev>';
+const APP_BASE_URL=(process.env.APP_BASE_URL||'https://gestao-mei-pro.vercel.app').replace(/\/$/,'');
 const ADMIN_SALT=process.env.ADMIN_SALT||'';
 const PGMEI_URL='https://www8.receita.fazenda.gov.br/SIMPLESNACIONAL/Servicos/Grupo.aspx?grp=8';
 const DAS_SERVICE_URL='https://www.gov.br/pt-br/servicos/emitir-das-para-pagamento-de-tributos-do-mei';
@@ -29,6 +35,7 @@ function tokenHash(t){return crypto.createHmac('sha256',secret()).update(t).dige
 async function init(sql){
  await sql`CREATE TABLE IF NOT EXISTS app_users(id SERIAL PRIMARY KEY,email TEXT UNIQUE NOT NULL,password_hash TEXT NOT NULL,name TEXT NOT NULL,created_at TIMESTAMPTZ DEFAULT NOW())`;
  await sql`CREATE TABLE IF NOT EXISTS app_sessions(id SERIAL PRIMARY KEY,user_id INTEGER REFERENCES app_users(id) ON DELETE CASCADE,token_hash TEXT UNIQUE NOT NULL,expires_at TIMESTAMPTZ NOT NULL,created_at TIMESTAMPTZ DEFAULT NOW())`;
+ await sql`CREATE TABLE IF NOT EXISTS password_reset_tokens(id SERIAL PRIMARY KEY,user_id INTEGER REFERENCES app_users(id) ON DELETE CASCADE,token_hash TEXT UNIQUE NOT NULL,expires_at TIMESTAMPTZ NOT NULL,used_at TIMESTAMPTZ,created_at TIMESTAMPTZ DEFAULT NOW())`;
  await sql`CREATE TABLE IF NOT EXISTS clients(id SERIAL PRIMARY KEY,cnpj TEXT UNIQUE NOT NULL,razao TEXT NOT NULL,fantasia TEXT,situacao TEXT,cep TEXT,municipio TEXT,uf TEXT,endereco TEXT,cnae TEXT,secundarias TEXT,telefone TEXT,email TEXT,created_at TIMESTAMPTZ DEFAULT NOW())`;
  await sql`CREATE TABLE IF NOT EXISTS revenues(id SERIAL PRIMARY KEY,client_id INTEGER REFERENCES clients(id) ON DELETE CASCADE,competence TEXT NOT NULL,amount NUMERIC(14,2) DEFAULT 0,notes TEXT,created_at TIMESTAMPTZ DEFAULT NOW(),UNIQUE(client_id,competence))`;
  await sql`CREATE TABLE IF NOT EXISTS obligations(id SERIAL PRIMARY KEY,client_id INTEGER REFERENCES clients(id) ON DELETE CASCADE,kind TEXT NOT NULL,competence TEXT NOT NULL,due_date DATE,amount NUMERIC(14,2) DEFAULT 0,status TEXT DEFAULT 'Pendente',created_at TIMESTAMPTZ DEFAULT NOW(),UNIQUE(client_id,kind,competence))`;
@@ -62,7 +69,9 @@ function html(){return `<!doctype html><html lang="pt-BR"><head><meta charset="u
 const $=id=>document.getElementById(id),root=$('root');let currentClient=null;
 const money=v=>Number(v||0).toLocaleString('pt-BR',{style:'currency',currency:'BRL'});
 async function api(p,o={}){const r=await fetch(p,{headers:{'Content-Type':'application/json'},...o});const d=await r.json().catch(()=>({}));if(!r.ok)throw Error(d.error||'Erro');return d}
-function login(msg=''){root.innerHTML='<div class="login"><div class="card"><div class="brand" style="color:#102a2e">Gestão MEI Pro<small style="color:#697682">Acesso do escritório</small></div>'+(msg?'<div class="error">'+msg+'</div>':'')+'<form id="lf"><label>E-mail<input id="le" type="email" value="${ADMIN_EMAIL}" required></label><label>Senha<input id="lp" type="password" required></label><button class="btn primary">Entrar</button></form></div></div>';$('lf').onsubmit=async e=>{e.preventDefault();try{await api('/api/login',{method:'POST',body:JSON.stringify({email:$('le').value,password:$('lp').value})});boot()}catch(x){login(x.message)}}}
+function login(msg=''){root.innerHTML='<div class="login"><div class="card"><div class="brand" style="color:#102a2e">Gestão MEI Pro<small style="color:#697682">Acesso do escritório</small></div>'+(msg?'<div class="error">'+msg+'</div>':'')+'<form id="lf"><label>E-mail<input id="le" type="email" value="${ADMIN_EMAIL}" required></label><label>Senha<input id="lp" type="password" required></label><button class="btn primary">Entrar</button></form><button class="btn ghost" id="forgot" style="width:100%;margin-top:10px">Esqueceu sua senha?</button></div></div>';$('lf').onsubmit=async e=>{e.preventDefault();try{await api('/api/login',{method:'POST',body:JSON.stringify({email:$('le').value,password:$('lp').value})});boot()}catch(x){login(x.message)}};$('forgot').onclick=()=>forgotPassword()}
+function forgotPassword(msg=''){root.innerHTML='<div class="login"><div class="card"><div class="brand" style="color:#102a2e">Recuperar senha<small style="color:#697682">Gestão MEI Pro</small></div>'+(msg?'<div class="info">'+msg+'</div>':'')+'<p class="muted">Informe o e-mail de acesso. O link será enviado ao e-mail de recuperação cadastrado.</p><form id="ff"><label>E-mail de acesso<input id="fe" type="email" value="${ADMIN_EMAIL}" required></label><button class="btn primary">Enviar link de recuperação</button></form><button class="btn ghost" id="backLogin" style="width:100%;margin-top:10px">Voltar ao login</button></div></div>';$('backLogin').onclick=()=>login();$('ff').onsubmit=async e=>{e.preventDefault();try{const d=await api('/api/password/forgot',{method:'POST',body:JSON.stringify({email:$('fe').value})});forgotPassword(d.message||'Se o usuário estiver cadastrado, enviaremos as instruções.')}catch(x){forgotPassword(x.message)}}}
+function resetPassword(token,msg=''){root.innerHTML='<div class="login"><div class="card"><div class="brand" style="color:#102a2e">Criar nova senha<small style="color:#697682">Link de uso único</small></div>'+(msg?'<div class="error">'+msg+'</div>':'')+'<p class="muted">Use pelo menos 10 caracteres, com maiúscula, minúscula, número e símbolo.</p><form id="rf"><label>Nova senha<input id="rp1" type="password" minlength="10" required></label><label>Confirmar nova senha<input id="rp2" type="password" minlength="10" required></label><button class="btn primary">Salvar nova senha</button></form></div></div>';$('rf').onsubmit=async e=>{e.preventDefault();if($('rp1').value!==$('rp2').value)return resetPassword(token,'As senhas não coincidem.');try{await api('/api/password/reset',{method:'POST',body:JSON.stringify({token,password:$('rp1').value})});login('Senha alterada com sucesso. Entre com a nova senha.')}catch(x){resetPassword(token,x.message)}}}
 function shell(u){root.innerHTML='<div class="layout"><aside><div class="brand">Gestão MEI Pro<small>Sistema operacional</small></div><div class="account"><b>'+u.name+'</b><br>Administrador</div><nav><button data-p="dash">Dashboard</button><button data-p="clients">Clientes</button><button data-p="new">Novo cliente</button><button data-p="das">DAS</button><button data-p="obs">DAS / DASN</button><button data-p="nfse">NFS-e</button><button id="logout">Sair</button></nav></aside><main id="main"></main></div>';document.querySelectorAll('[data-p]').forEach(b=>b.onclick=()=>show(b.dataset.p));$('logout').onclick=async()=>{await api('/api/logout',{method:'POST'}).catch(()=>{});login()};show('dash')}
 async function boot(){try{const d=await api('/api/me');shell(d.user)}catch{login()}}
 async function show(p){const m=$('main');m.innerHTML='<p>Carregando...</p>';try{if(p==='dash')await dash();if(p==='clients')await clients();if(p==='new')newClient();if(p==='das')await das();if(p==='obs')await obligations();if(p==='nfse')nfse()}catch(e){m.innerHTML='<div class="error">'+e.message+'</div>'}}
@@ -117,7 +126,7 @@ async function loadNfseList(){
  d.items.map(x=>'<tr><td>'+x.client_name+'</td><td>'+(x.tomador_nome||x.tomador_doc||'-')+'</td><td>'+money(x.valor)+'</td><td>'+(x.data_prestacao||'-')+'</td><td><span class="badge '+(x.status==='Rascunho'?'warn':'')+'">'+x.status+'</span></td></tr>').join('')+
  '</table>';
 }
-boot().catch(e=>login(e.message));
+const resetToken=new URLSearchParams(location.search).get('reset_token');if(resetToken)resetPassword(resetToken);else boot().catch(e=>login(e.message));
 </script></body></html>`}
 
 module.exports=async(req,res)=>{
@@ -164,6 +173,32 @@ module.exports=async(req,res)=>{
    }catch(e){}
 
    return send(res,404,{error:'CNPJ não encontrado nas fontes automáticas. Use “Conferir na Receita Federal”.'});
+  }
+  if(p==='/api/password/forgot'&&req.method==='POST'){
+   const b=await body(req),email=String(b.email||'').trim().toLowerCase();
+   const generic={ok:true,message:'Se o usuário estiver cadastrado, enviaremos as instruções para redefinir a senha.'};
+   if(email!==ADMIN_EMAIL)return send(res,200,generic);
+   if(!RESEND_API_KEY||!PASSWORD_RECOVERY_EMAIL)return send(res,503,{error:'Recuperação por e-mail ainda não configurada. Configure RESEND_API_KEY e PASSWORD_RECOVERY_EMAIL na Vercel.'});
+   const rows=await sql`SELECT id FROM app_users WHERE email=${ADMIN_EMAIL}`;const user=rows[0];
+   if(!user)return send(res,200,generic);
+   const raw=createResetToken(),hash=hashResetToken(raw),expires=resetExpiry();
+   await sql`DELETE FROM password_reset_tokens WHERE user_id=${user.id} OR expires_at<=NOW() OR used_at IS NOT NULL`;
+   await sql`INSERT INTO password_reset_tokens(user_id,token_hash,expires_at) VALUES(${user.id},${hash},${expires.toISOString()})`;
+   try{await sendResetEmail({apiKey:RESEND_API_KEY,from:RESET_FROM_EMAIL,to:PASSWORD_RECOVERY_EMAIL,resetUrl:buildResetUrl(APP_BASE_URL,raw)})}
+   catch(e){await sql`DELETE FROM password_reset_tokens WHERE token_hash=${hash}`;return send(res,502,{error:'Não foi possível enviar o e-mail de recuperação agora. Tente novamente em alguns minutos.'})}
+   return send(res,200,generic);
+  }
+  if(p==='/api/password/reset'&&req.method==='POST'){
+   const b=await body(req),raw=String(b.token||''),password=String(b.password||'');
+   if(!isStrongPassword(password))return send(res,400,{error:'A senha precisa ter ao menos 10 caracteres, com maiúscula, minúscula, número e símbolo.'});
+   const hash=hashResetToken(raw),rows=await sql`SELECT t.id token_id,t.user_id FROM password_reset_tokens t WHERE t.token_hash=${hash} AND t.used_at IS NULL AND t.expires_at>NOW()`;const item=rows[0];
+   if(!item)return send(res,400,{error:'Este link é inválido ou expirou. Solicite uma nova recuperação de senha.'});
+   const newHash=hashPassword(password);
+   await sql`UPDATE app_users SET password_hash=${newHash} WHERE id=${item.user_id}`;
+   await sql`UPDATE password_reset_tokens SET used_at=NOW() WHERE id=${item.token_id}`;
+   await sql`DELETE FROM password_reset_tokens WHERE user_id=${item.user_id} AND id<>${item.token_id}`;
+   await sql`DELETE FROM app_sessions WHERE user_id=${item.user_id}`;
+   return send(res,200,{ok:true});
   }
   if(p==='/api/login'&&req.method==='POST'){
    const b=await body(req),rows=await sql`SELECT id,email,name,password_hash FROM app_users WHERE email=${String(b.email||'').toLowerCase()}`,user=rows[0];
