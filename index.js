@@ -15,8 +15,14 @@ const PGMEI_URL='https://www8.receita.fazenda.gov.br/SIMPLESNACIONAL/Servicos/Gr
 const DAS_SERVICE_URL='https://www.gov.br/pt-br/servicos/emitir-das-para-pagamento-de-tributos-do-mei';
 const SERPRO_BASE=process.env.SERPRO_BASE_URL||'https://gateway.apiserpro.serpro.gov.br';
 function serproConfigured(){return Boolean(process.env.SERPRO_CONSUMER_KEY&&process.env.SERPRO_CONSUMER_SECRET&&process.env.SERPRO_CONTRATANTE&&process.env.SERPRO_AUTOR_PEDIDO)}
-// Somente Produção Restrita (tpAmb=2): notas de teste, sem valor fiscal.
-const NFSE_BASE_URL='https://sefin.producaorestrita.nfse.gov.br/API/SefinNacional';
+// Ambiente da NFS-e Nacional. Padrão: Produção Restrita (tpAmb=2, notas de teste sem valor fiscal).
+// Produção (tpAmb=1, notas com valor fiscal) só com NFSE_AMBIENTE=producao na Vercel.
+const NFSE_AMBIENTES={
+  producao_restrita:{tpAmb:2,label:'Produção Restrita (homologação) — notas de teste, sem valor fiscal',baseUrl:'https://sefin.producaorestrita.nfse.gov.br/API/SefinNacional'},
+  producao:{tpAmb:1,label:'PRODUÇÃO — notas com valor fiscal',baseUrl:'https://sefin.nfse.gov.br/SefinNacional'}
+};
+const NFSE_ENV=process.env.NFSE_AMBIENTE==='producao'?'producao':'producao_restrita';
+const NFSE_BASE_URL=NFSE_AMBIENTES[NFSE_ENV].baseUrl;
 function nfseCertificate(){
   if(!process.env.NFSE_CERT_PFX_BASE64)return null;
   return nfseNacional.loadCertificate(process.env.NFSE_CERT_PFX_BASE64.replace(/\s+/g,''),process.env.NFSE_CERT_PASSWORD||'');
@@ -25,7 +31,7 @@ function nfseConfig(){
   let certificate={ok:false,error:'Configure NFSE_CERT_PFX_BASE64 (arquivo .pfx em base64) e NFSE_CERT_PASSWORD na Vercel.'};
   try{const c=nfseCertificate();if(c)certificate={ok:true,commonName:c.commonName,cnpj:c.cnpj,notAfter:c.notAfter,expired:c.notAfter<new Date()}}
   catch(e){certificate={ok:false,error:e.message}}
-  return {environment:'producao_restrita',baseUrl:NFSE_BASE_URL,certificate,certificateConfigured:certificate.ok}
+  return {environment:NFSE_ENV,production:NFSE_ENV==='producao',label:NFSE_AMBIENTES[NFSE_ENV].label,baseUrl:NFSE_BASE_URL,certificate,certificateConfigured:certificate.ok}
 }
 
 function dbUrl(){return process.env.POSTGRES_URL||process.env.DATABASE_URL||process.env.POSTGRES_URL_NON_POOLING||process.env.POSTGRES_PRISMA_URL||process.env.NEON_DATABASE_URL}
@@ -109,21 +115,29 @@ async function nfseFillIbge(){
  const sel=$('nfseClient');const o=sel.options[sel.selectedIndex];if(!o)return;
  try{const d=await api('/api/cnpj?cnpj='+o.dataset.cnpj);if(d.codigo_ibge){$('nfseLocEmi').value=d.codigo_ibge;if(!$('nfseLocPrest').value)$('nfseLocPrest').value=d.codigo_ibge}}catch(e){}
 }
+let nfseCfg={};
+// Em produção, exige digitar EMITIR depois de rever o resumo da nota.
+function nfseConfirm(resumo){
+ if(!nfseCfg.production)return confirm('Emitir NFS-e de teste (Produção Restrita, sem valor fiscal)?')?'':null;
+ const t=prompt('ATENÇÃO: NFS-e REAL, com valor fiscal.'+String.fromCharCode(10,10)+resumo+String.fromCharCode(10,10)+'Confira os dados e digite EMITIR para confirmar:');
+ return t===null?null:String(t).trim().toUpperCase();
+}
 async function nfse(){
- const cfg=await api('/api/nfse/status');
+ const cfg=await api('/api/nfse/status');nfseCfg=cfg;
  const clients=await api('/api/clients');
  const opts=clients.clients.map(c=>'<option value="'+c.id+'" data-cnpj="'+escH(c.cnpj)+'">'+escH(c.fantasia||c.razao)+' — '+escH(c.cnpj)+'</option>').join('');
  const cert=cfg.certificate;
  $('main').innerHTML=
- '<div class="top"><div><h1>NFS-e Nacional</h1><p class="muted">Ambiente: Produção Restrita (homologação) — notas sem valor fiscal</p></div>'+
+ '<div class="top"><div><h1>NFS-e Nacional</h1><p class="muted">Ambiente: '+escH(cfg.label)+'</p></div>'+
  (cert&&cert.ok?'<span class="badge">Certificado configurado</span>':'<span class="badge warn">Certificado pendente</span>')+'</div>'+
+ (cfg.production?'<div class="error"><b>Ambiente de PRODUÇÃO:</b> as notas emitidas aqui têm valor fiscal. Cada emissão pede confirmação.</div>':'')+
  '<div class="info"><b>Como funciona:</b> o sistema monta a DPS, assina com o certificado A1 da empresa prestadora e envia para a Sefin Nacional. O certificado precisa ser do mesmo CNPJ do prestador.</div>'+
  '<div class="grid2"><div class="card"><h2>Certificado e conexão</h2>'+
- '<p><b>Ambiente:</b> Produção Restrita</p>'+
+ '<p><b>Ambiente:</b> '+(cfg.production?'Produção':'Produção Restrita')+'</p>'+
  (cert&&cert.ok?'<p><b>Titular:</b> '+escH(cert.commonName)+'</p><p><b>CNPJ:</b> '+escH(cert.cnpj||'não identificado')+'</p><p><b>Validade:</b> '+escH(String(cert.notAfter||'').slice(0,10))+'</p>':
   '<p class="muted">'+escH(cert&&cert.error||'Configure NFSE_CERT_PFX_BASE64 e NFSE_CERT_PASSWORD na Vercel.')+'</p>')+
  '<button class="btn ghost" id="nfseTest">Testar conexão</button><p id="nfseStatus" class="muted"></p></div>'+
- '<div class="card"><h2>Nova NFS-e de teste</h2>'+
+ '<div class="card"><h2>'+(cfg.production?'Nova NFS-e':'Nova NFS-e de teste')+'</h2>'+
  '<label>Prestador<select id="nfseClient">'+opts+'</select></label><br>'+
  '<label>Situação no Simples Nacional<select id="nfseOpSimp"><option value="3">Optante ME/EPP</option><option value="2">MEI</option><option value="1">Não optante</option></select></label><br>'+
  '<div class="form2"><label>CPF/CNPJ do tomador<input id="nfseTomadorDoc"></label>'+
@@ -134,18 +148,21 @@ async function nfse(){
  '<label>Data da prestação (competência)<input id="nfseData" type="date"></label>'+
  '<label>IBGE do município do prestador<input id="nfseLocEmi" placeholder="7 dígitos"></label>'+
  '<label>IBGE do local da prestação<input id="nfseLocPrest" placeholder="7 dígitos"></label></div><br>'+
- '<div class="actions"><button class="btn ghost" id="nfseSave">Salvar rascunho</button><button class="btn primary" id="nfseEmit">Emitir nota de teste</button></div>'+
+ '<div class="actions"><button class="btn ghost" id="nfseSave">Salvar rascunho</button><button class="btn primary" id="nfseEmit">'+(cfg.production?'Emitir NFS-e':'Emitir nota de teste')+'</button></div>'+
  '<p id="nfseMsg" class="muted"></p></div></div>'+
  '<div class="card"><h2>Rascunhos e notas</h2><div id="nfseList">Carregando...</div></div>';
  $('nfseClient').onchange=()=>{$('nfseLocEmi').value='';nfseFillIbge()};nfseFillIbge();
  $('nfseTest').onclick=async()=>{$('nfseStatus').textContent='Testando...';try{const d=await api('/api/nfse/test',{method:'POST',body:'{}'});$('nfseStatus').textContent=d.message}catch(e){$('nfseStatus').textContent=e.message}};
  $('nfseSave').onclick=async()=>{try{await api('/api/nfse/drafts',{method:'POST',body:JSON.stringify(nfseForm())});$('nfseMsg').textContent='Rascunho salvo com sucesso.';await loadNfseList()}catch(e){$('nfseMsg').textContent=e.message}};
- $('nfseEmit').onclick=async()=>{const b=$('nfseEmit');b.disabled=true;$('nfseMsg').textContent='Assinando e enviando para a NFS-e Nacional...';try{const d=await api('/api/nfse/emitir',{method:'POST',body:JSON.stringify(nfseForm())});$('nfseMsg').textContent=d.message||'Enviado.'}catch(e){$('nfseMsg').textContent=e.message}finally{b.disabled=false;await loadNfseList()}};
+ $('nfseEmit').onclick=async()=>{const f=nfseForm(),sel=$('nfseClient'),pr=sel.options[sel.selectedIndex];
+  const conf=nfseConfirm('Prestador: '+(pr?pr.textContent:'-')+String.fromCharCode(10)+'Tomador: '+(f.tomador_nome||'-')+' ('+(f.tomador_doc||'-')+')'+String.fromCharCode(10)+'Valor: '+money(f.valor)+String.fromCharCode(10)+'Competência: '+(f.data_prestacao||'-')+String.fromCharCode(10)+'Código: '+(f.c_trib_nac||'-'));
+  if(conf===null)return;f.confirmacao=conf;
+  const b=$('nfseEmit');b.disabled=true;$('nfseMsg').textContent='Assinando e enviando para a NFS-e Nacional...';try{const d=await api('/api/nfse/emitir',{method:'POST',body:JSON.stringify(f)});$('nfseMsg').textContent=d.message||'Enviado.'}catch(e){$('nfseMsg').textContent=e.message}finally{b.disabled=false;await loadNfseList()}};
  await loadNfseList();
 }
-async function nfseEmitDraft(id){
- if(!confirm('Emitir a NFS-e de teste deste rascunho?'))return;
- try{const d=await api('/api/nfse/emitir',{method:'POST',body:JSON.stringify({id})});alert(d.message||'Enviado.')}catch(e){alert(e.message)}
+async function nfseEmitDraft(id,resumo){
+ const conf=nfseConfirm(resumo||'Rascunho nº '+id);if(conf===null)return;
+ try{const d=await api('/api/nfse/emitir',{method:'POST',body:JSON.stringify({id,confirmacao:conf})});alert(d.message||'Enviado.')}catch(e){alert(e.message)}
  await loadNfseList();
 }
 async function loadNfseList(){
@@ -153,9 +170,9 @@ async function loadNfseList(){
  const badge=s=>s==='Autorizada'?'':(s==='Rejeitada'?'danger':'warn');
  $('nfseList').innerHTML='<table><tr><th>Prestador</th><th>Tomador</th><th>Valor</th><th>Competência</th><th>Status</th><th>Nº / chave</th><th></th></tr>'+
  d.items.map(x=>'<tr><td>'+escH(x.client_name)+'</td><td>'+escH(x.tomador_nome||x.tomador_doc||'-')+'</td><td>'+money(x.valor)+'</td><td>'+escH(String(x.data_prestacao||'-').slice(0,10))+'</td>'+
-  '<td><span class="badge '+badge(x.status)+'">'+escH(x.status)+'</span>'+(x.erro?'<div class="muted" style="max-width:320px;white-space:normal">'+escH(x.erro)+'</div>':'')+'</td>'+
+  '<td><span class="badge '+badge(x.status)+'">'+escH(x.status)+'</span> <span class="muted">'+(x.environment==='producao'?'Produção':'Teste')+'</span>'+(x.erro?'<div class="muted" style="max-width:320px;white-space:normal">'+escH(x.erro)+'</div>':'')+'</td>'+
   '<td>'+(x.numero_nfse?'<b>'+escH(x.numero_nfse)+'</b><br>':'')+'<span class="muted" style="word-break:break-all">'+escH(x.chave_acesso||'')+'</span></td>'+
-  '<td>'+(x.status==='Autorizada'?'<a class="btn ghost" href="/api/nfse/xml?id='+x.id+'">XML</a>':(x.status==='Rascunho'||x.status==='Rejeitada'?'<button class="btn ghost" onclick="nfseEmitDraft('+x.id+')">Emitir</button>':''))+'</td></tr>').join('')+
+  '<td>'+(x.status==='Autorizada'?'<a class="btn ghost" href="/api/nfse/xml?id='+x.id+'">XML</a>':(x.status==='Rascunho'||x.status==='Rejeitada'?'<button class="btn ghost" onclick="nfseEmitDraft('+x.id+',this.dataset.r)" data-r="'+escH((x.client_name||'')+' → '+(x.tomador_nome||x.tomador_doc||'-')+' | '+money(x.valor)+' | '+String(x.data_prestacao||'').slice(0,10))+'">Emitir</button>':''))+'</td></tr>').join('')+
  '</table>';
 }
 const resetToken=new URLSearchParams(location.search).get('reset_token');if(resetToken)resetPassword(resetToken);else boot().catch(e=>login(e.message));
@@ -166,7 +183,7 @@ async function insertNfseDraft(sql,b){
    client_id,environment,tomador_doc,tomador_nome,servico_descricao,valor,
    data_prestacao,municipio_prestacao,status,op_simp_nac,c_trib_nac,c_loc_emi,c_loc_prestacao
  ) VALUES(
-   ${Number(b.client_id)},'producao_restrita',${String(b.tomador_doc||'').replace(/\D/g,'')},
+   ${Number(b.client_id)},${NFSE_ENV},${String(b.tomador_doc||'').replace(/\D/g,'')},
    ${b.tomador_nome||''},${b.servico_descricao||''},${Number(b.valor)||0},
    ${b.data_prestacao||null},${b.c_loc_prestacao||b.municipio_prestacao||''},'Rascunho',
    ${Number(b.op_simp_nac)||2},${String(b.c_trib_nac||'').replace(/\D/g,'')},
@@ -288,7 +305,7 @@ module.exports=async(req,res)=>{
   }
   if(p==='/api/nfse/drafts'&&req.method==='GET'){
     const items=await sql`SELECT n.id,n.client_id,n.tomador_doc,n.tomador_nome,n.servico_descricao,n.valor,n.data_prestacao,
-      n.status,n.chave_acesso,n.numero_nfse,n.erro,n.c_trib_nac,n.n_dps,n.serie,n.created_at,COALESCE(c.fantasia,c.razao) client_name
+      n.status,n.environment,n.chave_acesso,n.numero_nfse,n.erro,n.c_trib_nac,n.n_dps,n.serie,n.created_at,COALESCE(c.fantasia,c.razao) client_name
       FROM nfse_drafts n JOIN clients c ON c.id=n.client_id
       ORDER BY n.created_at DESC LIMIT 100`;
     return send(res,200,{items});
@@ -307,6 +324,9 @@ module.exports=async(req,res)=>{
     try{cert=nfseCertificate()}catch(e){return send(res,409,{error:e.message})}
     if(!cert)return send(res,409,{error:'Emissão bloqueada: configure primeiro o certificado digital A1 da empresa (NFSE_CERT_PFX_BASE64 e NFSE_CERT_PASSWORD).'});
     if(cert.notAfter<new Date())return send(res,409,{error:'O certificado digital A1 está vencido.'});
+    if(NFSE_ENV==='producao'&&String(b.confirmacao||'').trim().toUpperCase()!=='EMITIR'){
+      return send(res,400,{error:'Emissão em produção não confirmada. Digite EMITIR para confirmar.'});
+    }
     let id=Number(b.id);
     if(!id){
       if(!Number(b.client_id)||!String(b.servico_descricao||'').trim()||!Number(b.valor)){
@@ -327,13 +347,13 @@ module.exports=async(req,res)=>{
     const lock=await sql`UPDATE nfse_drafts SET status='Enviando',updated_at=NOW() WHERE id=${id} AND status IN ('Rascunho','Rejeitada') RETURNING id`;
     if(!lock[0])return send(res,409,{error:'Esta nota já foi enviada (situação: '+prev+').'});
     const serie=String(process.env.NFSE_SERIE||'1');
-    const seq=await sql`SELECT COALESCE(MAX(n_dps),0)+1 AS n FROM nfse_drafts WHERE client_id=${d.client_id} AND serie=${serie} AND environment='producao_restrita'`;
+    const seq=await sql`SELECT COALESCE(MAX(n_dps),0)+1 AS n FROM nfse_drafts WHERE client_id=${d.client_id} AND serie=${serie} AND environment=${NFSE_ENV}`;
     const nDPS=Number(seq[0].n);
     const dCompet=d.data_prestacao instanceof Date?d.data_prestacao.toISOString().slice(0,10):String(d.data_prestacao||'').slice(0,10);
     let built,signed;
     try{
       built=nfseNacional.buildDps({
-        tpAmb:2,versao:process.env.NFSE_DPS_VERSAO||'1.00',prestadorCnpj:cnpj,opSimpNac:d.op_simp_nac||2,
+        tpAmb:NFSE_AMBIENTES[NFSE_ENV].tpAmb,versao:process.env.NFSE_DPS_VERSAO||'1.00',prestadorCnpj:cnpj,opSimpNac:d.op_simp_nac||2,
         cLocEmi:d.c_loc_emi,cLocPrestacao:d.c_loc_prestacao,serie,nDPS,dCompet,
         tomadorDoc:d.tomador_doc,tomadorNome:d.tomador_nome,cTribNac:d.c_trib_nac,xDescServ:d.servico_descricao,vServ:d.valor
       });
@@ -342,7 +362,7 @@ module.exports=async(req,res)=>{
       await sql`UPDATE nfse_drafts SET status=${prev},erro=${e.message},updated_at=NOW() WHERE id=${id}`;
       return send(res,400,{error:e.message});
     }
-    await sql`UPDATE nfse_drafts SET serie=${serie},n_dps=${nDPS},id_dps=${built.id},dps_xml=${signed},erro=NULL,updated_at=NOW() WHERE id=${id}`;
+    await sql`UPDATE nfse_drafts SET environment=${NFSE_ENV},serie=${serie},n_dps=${nDPS},id_dps=${built.id},dps_xml=${signed},erro=NULL,updated_at=NOW() WHERE id=${id}`;
     let r;
     try{r=await nfseNacional.transmitDps({baseUrl:NFSE_BASE_URL,cert,signedXml:signed})}
     catch(e){
@@ -353,7 +373,7 @@ module.exports=async(req,res)=>{
     if(r.ok){
       const alertas=r.alertas&&r.alertas.length?'Alertas: '+r.alertas.join(' | '):null;
       await sql`UPDATE nfse_drafts SET status='Autorizada',chave_acesso=${r.chaveAcesso},numero_nfse=${r.numero},xml_nfse=${r.xml},erro=${alertas},updated_at=NOW() WHERE id=${id}`;
-      return send(res,200,{ok:true,id,chaveAcesso:r.chaveAcesso,numero:r.numero,message:'NFS-e de teste autorizada'+(r.numero?' nº '+r.numero:'')+'. Chave: '+r.chaveAcesso}); 
+      return send(res,200,{ok:true,id,chaveAcesso:r.chaveAcesso,numero:r.numero,message:(NFSE_ENV==='producao'?'NFS-e autorizada':'NFS-e de teste autorizada')+(r.numero?' nº '+r.numero:'')+'. Chave: '+r.chaveAcesso}); 
     }
     await sql`UPDATE nfse_drafts SET status='Rejeitada',erro=${r.error},updated_at=NOW() WHERE id=${id}`;
     return send(res,422,{error:'Rejeitada pela NFS-e Nacional: '+r.error});

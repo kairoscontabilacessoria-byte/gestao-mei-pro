@@ -24,7 +24,19 @@ Módulos:
 O sistema monta a DPS, assina o XML (XMLDSig) com o certificado A1 da empresa
 prestadora e envia para a Sefin Nacional da Produção Restrita
 (`sefin.producaorestrita.nfse.gov.br`). As notas geradas ali são de teste e não têm valor fiscal.
-A emissão em produção não está habilitada.
+
+### Emissão em produção (notas com valor fiscal)
+
+Por padrão o sistema emite na Produção Restrita. Para emitir notas reais:
+
+1. Emita antes pelo menos uma nota de teste na Produção Restrita e confirme que foi autorizada.
+2. Na Vercel, crie a variável `NFSE_AMBIENTE` com o valor `producao` e faça novo deploy.
+3. A tela NFS-e passa a mostrar o aviso de PRODUÇÃO. Cada emissão mostra o resumo da nota
+   e só é enviada depois de digitar `EMITIR`. O servidor também recusa o envio sem essa confirmação.
+
+Para voltar ao ambiente de teste, apague `NFSE_AMBIENTE` (ou use `producao_restrita`) e faça novo deploy.
+A numeração da DPS é separada por ambiente. Se a empresa já emitiu DPS pela mesma série em outro
+sistema, defina `NFSE_SERIE` com uma série diferente para não repetir números.
 
 ### Configurar o certificado na Vercel
 
