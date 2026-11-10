@@ -4,6 +4,7 @@ const crypto = require('crypto');
 const {createResetToken,hashResetToken,resetExpiry,isStrongPassword,buildResetUrl}=require('./password-reset');
 const {sendResetEmail}=require('./resend-email');
 const nfseNacional=require('./nfse-nacional');
+const {danfsePdf}=require('./danfse-pdf');
 
 const ADMIN_EMAIL='admin@gestaomei.local';
 const PASSWORD_RECOVERY_EMAIL=process.env.PASSWORD_RECOVERY_EMAIL||'';
@@ -172,7 +173,7 @@ async function loadNfseList(){
  d.items.map(x=>'<tr><td>'+escH(x.client_name)+'</td><td>'+escH(x.tomador_nome||x.tomador_doc||'-')+'</td><td>'+money(x.valor)+'</td><td>'+escH(String(x.data_prestacao||'-').slice(0,10))+'</td>'+
   '<td><span class="badge '+badge(x.status)+'">'+escH(x.status)+'</span> <span class="muted">'+(x.environment==='producao'?'Produção':'Teste')+'</span>'+(x.erro?'<div class="muted" style="max-width:320px;white-space:normal">'+escH(x.erro)+'</div>':'')+'</td>'+
   '<td>'+(x.numero_nfse?'<b>'+escH(x.numero_nfse)+'</b><br>':'')+'<span class="muted" style="word-break:break-all">'+escH(x.chave_acesso||'')+'</span></td>'+
-  '<td>'+(x.status==='Autorizada'?'<a class="btn ghost" href="/api/nfse/xml?id='+x.id+'">XML</a>':(x.status==='Rascunho'||x.status==='Rejeitada'?'<button class="btn ghost" onclick="nfseEmitDraft('+x.id+',this.dataset.r)" data-r="'+escH((x.client_name||'')+' → '+(x.tomador_nome||x.tomador_doc||'-')+' | '+money(x.valor)+' | '+String(x.data_prestacao||'').slice(0,10))+'">Emitir</button>':''))+'</td></tr>').join('')+
+  '<td>'+(x.status==='Autorizada'?'<div class="actions"><a class="btn ghost" href="/api/nfse/pdf?id='+x.id+'" target="_blank">PDF</a><a class="btn ghost" href="/api/nfse/xml?id='+x.id+'">XML</a></div>':(x.status==='Rascunho'||x.status==='Rejeitada'?'<button class="btn ghost" onclick="nfseEmitDraft('+x.id+',this.dataset.r)" data-r="'+escH((x.client_name||'')+' → '+(x.tomador_nome||x.tomador_doc||'-')+' | '+money(x.valor)+' | '+String(x.data_prestacao||'').slice(0,10))+'">Emitir</button>':''))+'</td></tr>').join('')+
  '</table>';
 }
 const resetToken=new URLSearchParams(location.search).get('reset_token');if(resetToken)resetPassword(resetToken);else boot().catch(e=>login(e.message));
@@ -377,6 +378,25 @@ module.exports=async(req,res)=>{
     }
     await sql`UPDATE nfse_drafts SET status='Rejeitada',erro=${r.error},updated_at=NOW() WHERE id=${id}`;
     return send(res,422,{error:'Rejeitada pela NFS-e Nacional: '+r.error});
+  }
+  if(p==='/api/nfse/pdf'&&req.method==='GET'){
+    const id=Number(u.searchParams.get('id'));
+    const rows=await sql`SELECT n.chave_acesso,n.xml_nfse,n.environment,n.numero_nfse,c.cnpj FROM nfse_drafts n JOIN clients c ON c.id=n.client_id WHERE n.id=${id}`;
+    const n=rows[0];
+    if(!n||!n.xml_nfse)return send(res,404,{error:'Nota sem XML autorizado: o PDF só fica disponível para notas autorizadas.'});
+    let pdf=null,fonte='xml';
+    // 1º: DANFSe oficial do ADN (com o certificado do prestador); 2º: PDF gerado a partir do XML autorizado.
+    try{
+      const cert=nfseCertificate();
+      if(cert&&n.chave_acesso){
+        const r=await nfseNacional.downloadDanfse({chave:n.chave_acesso,tpAmb:n.environment==='producao'?1:2,cert});
+        if(r.ok){pdf=r.pdf;fonte='adn'}
+      }
+    }catch(e){console.error('DANFSe ADN',e.message)}
+    if(!pdf)pdf=danfsePdf(n.xml_nfse);
+    res.setHeader('Content-Disposition','inline; filename="NFSe_'+String(n.numero_nfse||n.chave_acesso||id).replace(/[^0-9A-Za-z]/g,'')+'.pdf"');
+    res.setHeader('X-DANFSe-Fonte',fonte);
+    return send(res,200,pdf,'application/pdf');
   }
   if(p==='/api/nfse/xml'&&req.method==='GET'){
     const id=Number(u.searchParams.get('id'));
