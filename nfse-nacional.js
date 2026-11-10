@@ -157,7 +157,7 @@ function signDps(xml, id, cert, alg = 'sha1') {
 const gzipB64 = s => zlib.gzipSync(Buffer.from(s, 'utf8')).toString('base64');
 const gunzipB64 = s => zlib.gunzipSync(Buffer.from(s, 'base64')).toString('utf8');
 
-function request({ method, url, cert, body, timeout = 30000 }) {
+function request({ method, url, cert, body, timeout = 30000, binary = false }) {
   return new Promise((resolve, reject) => {
     const u = new URL(url);
     const req = https.request({
@@ -166,10 +166,12 @@ function request({ method, url, cert, body, timeout = 30000 }) {
       headers: { Accept: 'application/json', ...(body ? { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(body) } : {}) },
       timeout
     }, res => {
-      let data = '';
-      res.setEncoding('utf8');
-      res.on('data', c => { data += c; });
+      const parts = [];
+      res.on('data', c => { parts.push(c); });
       res.on('end', () => {
+        const buf = Buffer.concat(parts);
+        if (binary) return resolve({ status: res.statusCode, headers: res.headers, buffer: buf });
+        const data = buf.toString('utf8');
         let json = null;
         try { json = data ? JSON.parse(data) : null; } catch (e) { /* resposta não-JSON */ }
         resolve({ status: res.statusCode, json, text: data });
@@ -213,4 +215,13 @@ async function testConnection({ baseUrl, cert, requestImpl = request }) {
   return { ok: true, status: r.status, message: 'Conexão autenticada com a NFS-e Nacional (HTTP ' + r.status + ').' };
 }
 
-module.exports = { buildDps, buildDpsId, validateDps, signDps, loadCertificate, extractCnpj, transmitDps, testConnection, gzipB64, gunzipB64, dhEmiBrasilia, NS_NFSE };
+// DANFSe oficial (PDF) gerado pelo Ambiente de Dados Nacional a partir da chave de acesso.
+const ADN_URLS = { 1: 'https://adn.nfse.gov.br', 2: 'https://adn.producaorestrita.nfse.gov.br' };
+async function downloadDanfse({ chave, tpAmb = 1, cert, requestImpl = request }) {
+  if (!/^\d{50}$/.test(String(chave || ''))) return { ok: false, error: 'Chave de acesso inválida.' };
+  const r = await requestImpl({ method: 'GET', url: ADN_URLS[tpAmb === 2 ? 2 : 1] + '/danfse/' + chave, cert, binary: true, timeout: 20000 });
+  if (r.status === 200 && r.buffer && r.buffer.slice(0, 5).toString('latin1') === '%PDF-') return { ok: true, pdf: r.buffer };
+  return { ok: false, error: 'DANFSe oficial indisponível (HTTP ' + r.status + ').' };
+}
+
+module.exports = { downloadDanfse, buildDps, buildDpsId, validateDps, signDps, loadCertificate, extractCnpj, transmitDps, testConnection, gzipB64, gunzipB64, dhEmiBrasilia, NS_NFSE };
